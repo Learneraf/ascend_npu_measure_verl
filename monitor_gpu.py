@@ -59,8 +59,42 @@ class NVMLMonitor(BaseMonitor):
         self._handles = {i: pynvml.nvmlDeviceGetHandleByIndex(i) for i in gpu_ids}
         self._nvlink_prev = {}  # gid -> (timestamp, tx_bytes, rx_bytes)
 
+    def _read_nvlink_kib_all(self):
+        """一次调用 nvidia-smi nvlink -gt d，返回 {gid: (tx_kib, rx_kib)}。"""
+        import subprocess as _sp, re as _re
+        try:
+            out = _sp.check_output(
+                ["nvidia-smi", "nvlink", "-gt", "d"],
+                text=True, timeout=8
+            )
+        except Exception:
+            return {}
+        result = {}
+        cur_gid, tx, rx = None, 0, 0
+        for line in out.splitlines():
+            gm = _re.match(r"^GPU\s+(\d+):", line)
+            if gm:
+                if cur_gid is not None:
+                    result[cur_gid] = (tx, rx)
+                cur_gid = int(gm.group(1))
+                tx, rx = 0, 0
+                continue
+            m = _re.search(r"Data Tx:\s+(\d+)", line)
+            if m and cur_gid is not None:
+                tx += int(m.group(1))
+            m = _re.search(r"Data Rx:\s+(\d+)", line)
+            if m and cur_gid is not None:
+                rx += int(m.group(1))
+        if cur_gid is not None:
+            result[cur_gid] = (tx, rx)
+        return result
+
     def sample(self):
         results = {}
+        # ── NVLink 累计计数（一次调用读全部 GPU，KiB 单位）──────────────────
+        _now = time.time()
+        _nvlink_cur = self._read_nvlink_kib_all()
+
         for gid, hdl in self._handles.items():
             try:
                 util  = self._pynvml.nvmlDeviceGetUtilizationRates(hdl)
@@ -74,24 +108,19 @@ class NVMLMonitor(BaseMonitor):
                     power_w=round(power, 1),
                     temp_c=temp,
                 )
-                # ── 带宽：NVLink 瞬时吞吐（支持 NVSwitch 拓扑）> PCIe fallback ──
+                # ── NVLink 带宽：delta(KiB) / dt → GB/s ─────────────────────
                 try:
-                    # field 131=NVLINK_THROUGHPUT_DATA_TX, 132=RX，单位 KB/s
-                    # 适用于 NVSwitch 拓扑（A100 SXM4 等），无需枚举 peer link
-                    _fv = self._pynvml.nvmlDeviceGetFieldValues(hdl, [131, 132])
-                    _tx_kb = _fv[0].value.ullVal
-                    _rx_kb = _fv[1].value.ullVal
-                    results[gid].bw_tx_GBs = round(_tx_kb / 1e6, 3)
-                    results[gid].bw_rx_GBs = round(_rx_kb / 1e6, 3)
+                    if gid in _nvlink_cur and gid in self._nvlink_prev:
+                        _pt, _px, _py = self._nvlink_prev[gid]
+                        _dt = _now - _pt
+                        _tx, _rx = _nvlink_cur[gid]
+                        if _dt > 0 and _tx >= _px and _rx >= _py:
+                            results[gid].bw_tx_GBs = round((_tx - _px) / _dt / 1e6, 2)
+                            results[gid].bw_rx_GBs = round((_rx - _py) / _dt / 1e6, 2)
+                    if gid in _nvlink_cur:
+                        self._nvlink_prev[gid] = (_now, *_nvlink_cur[gid])
                 except Exception:
-                    try:
-                        # fallback：PCIe 瞬时吞吐（KB/s → GB/s）
-                        _txk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 0)
-                        _rxk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 1)
-                        results[gid].bw_tx_GBs = round(_txk / 1e6, 3)
-                        results[gid].bw_rx_GBs = round(_rxk / 1e6, 3)
-                    except Exception:
-                        pass
+                    pass
             except Exception:
                 results[gid] = GPUSample()
         return results
