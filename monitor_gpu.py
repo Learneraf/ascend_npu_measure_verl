@@ -74,35 +74,24 @@ class NVMLMonitor(BaseMonitor):
                     power_w=round(power, 1),
                     temp_c=temp,
                 )
-                # ── 带宽：NVLink 累计计数 → delta/dt；无 NVLink 则 PCIe fallback ──
+                # ── 带宽：NVLink 瞬时吞吐（支持 NVSwitch 拓扑）> PCIe fallback ──
                 try:
-                    tx_t, rx_t, has_lnk = 0, 0, False
-                    for lnk in range(18):
-                        try:
-                            if not self._pynvml.nvmlDeviceGetNvLinkState(hdl, lnk):
-                                continue
-                            tx_t += self._pynvml.nvmlDeviceGetNvLinkUtilizationCounter(hdl, lnk, 0)
-                            rx_t += self._pynvml.nvmlDeviceGetNvLinkUtilizationCounter(hdl, lnk, 1)
-                            has_lnk = True
-                        except self._pynvml.NVMLError:
-                            break
-                    _now = time.time()
-                    if has_lnk:
-                        if gid in self._nvlink_prev:
-                            _pt, _px, _py = self._nvlink_prev[gid]
-                            _dt = _now - _pt
-                            if _dt > 0 and tx_t >= _px and rx_t >= _py:
-                                results[gid].bw_tx_GBs = round((tx_t - _px) / _dt / 1e9, 3)
-                                results[gid].bw_rx_GBs = round((rx_t - _py) / _dt / 1e9, 3)
-                        self._nvlink_prev[gid] = (_now, tx_t, rx_t)
-                    else:
-                        # PCIe 瞬时吞吐（KB/s → GB/s）
+                    # field 131=NVLINK_THROUGHPUT_DATA_TX, 132=RX，单位 KB/s
+                    # 适用于 NVSwitch 拓扑（A100 SXM4 等），无需枚举 peer link
+                    _fv = self._pynvml.nvmlDeviceGetFieldValues(hdl, [131, 132])
+                    _tx_kb = _fv[0].value.ullVal
+                    _rx_kb = _fv[1].value.ullVal
+                    results[gid].bw_tx_GBs = round(_tx_kb / 1e6, 3)
+                    results[gid].bw_rx_GBs = round(_rx_kb / 1e6, 3)
+                except Exception:
+                    try:
+                        # fallback：PCIe 瞬时吞吐（KB/s → GB/s）
                         _txk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 0)
                         _rxk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 1)
                         results[gid].bw_tx_GBs = round(_txk / 1e6, 3)
                         results[gid].bw_rx_GBs = round(_rxk / 1e6, 3)
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
             except Exception:
                 results[gid] = GPUSample()
         return results
