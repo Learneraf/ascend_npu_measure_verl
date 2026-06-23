@@ -22,15 +22,18 @@ import psutil
 
 class GPUSample:
     """单个 GPU 在某一时刻的采样值。缺失字段为 None。"""
-    __slots__ = ("util_pct", "mem_used_gb", "mem_total_gb", "power_w", "temp_c")
+    __slots__ = ("util_pct", "mem_used_gb", "mem_total_gb", "power_w", "temp_c",
+                 "bw_tx_GBs", "bw_rx_GBs")
 
     def __init__(self, util_pct=None, mem_used_gb=None, mem_total_gb=None,
-                 power_w=None, temp_c=None):
+                 power_w=None, temp_c=None, bw_tx_GBs=None, bw_rx_GBs=None):
         self.util_pct    = util_pct
         self.mem_used_gb = mem_used_gb
         self.mem_total_gb = mem_total_gb
         self.power_w     = power_w
         self.temp_c      = temp_c
+        self.bw_tx_GBs   = bw_tx_GBs
+        self.bw_rx_GBs   = bw_rx_GBs
 
 
 class BaseMonitor:
@@ -54,6 +57,7 @@ class NVMLMonitor(BaseMonitor):
         self._pynvml = pynvml
         pynvml.nvmlInit()
         self._handles = {i: pynvml.nvmlDeviceGetHandleByIndex(i) for i in gpu_ids}
+        self._nvlink_prev = {}  # gid -> (timestamp, tx_bytes, rx_bytes)
 
     def sample(self):
         results = {}
@@ -70,6 +74,35 @@ class NVMLMonitor(BaseMonitor):
                     power_w=round(power, 1),
                     temp_c=temp,
                 )
+                # ── 带宽：NVLink 累计计数 → delta/dt；无 NVLink 则 PCIe fallback ──
+                try:
+                    tx_t, rx_t, has_lnk = 0, 0, False
+                    for lnk in range(18):
+                        try:
+                            if not self._pynvml.nvmlDeviceGetNvLinkState(hdl, lnk):
+                                continue
+                            tx_t += self._pynvml.nvmlDeviceGetNvLinkUtilizationCounter(hdl, lnk, 0)
+                            rx_t += self._pynvml.nvmlDeviceGetNvLinkUtilizationCounter(hdl, lnk, 1)
+                            has_lnk = True
+                        except self._pynvml.NVMLError:
+                            break
+                    _now = time.time()
+                    if has_lnk:
+                        if gid in self._nvlink_prev:
+                            _pt, _px, _py = self._nvlink_prev[gid]
+                            _dt = _now - _pt
+                            if _dt > 0 and tx_t >= _px and rx_t >= _py:
+                                results[gid].bw_tx_GBs = round((tx_t - _px) / _dt / 1e9, 3)
+                                results[gid].bw_rx_GBs = round((rx_t - _py) / _dt / 1e9, 3)
+                        self._nvlink_prev[gid] = (_now, tx_t, rx_t)
+                    else:
+                        # PCIe 瞬时吞吐（KB/s → GB/s）
+                        _txk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 0)
+                        _rxk = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, 1)
+                        results[gid].bw_tx_GBs = round(_txk / 1e6, 3)
+                        results[gid].bw_rx_GBs = round(_rxk / 1e6, 3)
+                except Exception:
+                    pass
             except Exception:
                 results[gid] = GPUSample()
         return results
@@ -172,6 +205,24 @@ class ROCMSMIMonitor(BaseMonitor):
             gid = int(m.group(1))
             if gid in results:
                 results[gid].util_pct = float(m.group(2))
+        # ── PCIe / XGMI 带宽（rocm-smi --showbw，单位 MiB/s）────────────
+        try:
+            bw_out = self._run_smi("--showbw")
+            for line in bw_out.splitlines():
+                m2 = re.search(r"GPU\[(\d+)\]", line)
+                if not m2:
+                    continue
+                gid2 = int(m2.group(1))
+                if gid2 not in results:
+                    continue
+                nums = re.findall(r"[\d.]+", line[m2.end():])
+                if len(nums) >= 2:
+                    results[gid2].bw_tx_GBs = round(float(nums[0]) / 1024, 3)
+                    results[gid2].bw_rx_GBs = round(float(nums[1]) / 1024, 3)
+                elif len(nums) == 1:
+                    results[gid2].bw_tx_GBs = round(float(nums[0]) / 1024, 3)
+        except Exception:
+            pass
         return results
 
     def close(self):
@@ -261,6 +312,30 @@ class NPUSMIMonitor(BaseMonitor):
                     if len(nums) >= 2:
                         results[npu_id].power_w = float(nums[0])
                         results[npu_id].temp_c  = float(nums[1])
+                except (ValueError, IndexError):
+                    continue
+        except Exception:
+            pass
+
+        # ── HCCS 带宽（npu-smi info -t traffic，TX/RX 末两列，单位 GB/s）──
+        try:
+            r = subprocess.run(
+                ["npu-smi", "info", "-t", "traffic"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if not line or line.startswith(("NPU", "+", "-", "=")):
+                    continue
+                parts = re.split(r"\s+", line)
+                try:
+                    npu_id = int(parts[0])
+                    if npu_id not in results:
+                        continue
+                    nums = [x for x in parts if re.match(r"^[\d.]+$", x)]
+                    if len(nums) >= 2:
+                        results[npu_id].bw_tx_GBs = float(nums[-2])
+                        results[npu_id].bw_rx_GBs = float(nums[-1])
                 except (ValueError, IndexError):
                     continue
         except Exception:
@@ -436,6 +511,8 @@ def build_header(n_gpus: int) -> list:
             f"gpu{i}_mem_total_gb",
             f"gpu{i}_power_w",
             f"gpu{i}_temp_c",
+            f"gpu{i}_bw_tx_GBs",
+            f"gpu{i}_bw_rx_GBs",
         ]
     cols += ["cpu_util_pct", "ram_used_gb", "ram_total_gb"]
     return cols
@@ -488,6 +565,8 @@ def main():
                 row[f"gpu{gid}_mem_total_gb"] = "" if s.mem_total_gb is None else s.mem_total_gb
                 row[f"gpu{gid}_power_w"]      = "" if s.power_w      is None else s.power_w
                 row[f"gpu{gid}_temp_c"]        = "" if s.temp_c       is None else s.temp_c
+                row[f"gpu{gid}_bw_tx_GBs"]    = "" if s.bw_tx_GBs   is None else s.bw_tx_GBs
+                row[f"gpu{gid}_bw_rx_GBs"]    = "" if s.bw_rx_GBs   is None else s.bw_rx_GBs
 
             # ── CPU / RAM ────────────────────────────────────────
             row["cpu_util_pct"] = psutil.cpu_percent(interval=None)
