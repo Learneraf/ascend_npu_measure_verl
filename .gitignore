@@ -1,0 +1,11 @@
+# Large generated directories
+venv/
+**/outputs/
+**/wandb/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Slurm/Ray tmp
+ray_tmp/
+*.log
