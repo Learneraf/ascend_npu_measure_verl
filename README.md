@@ -19,4 +19,5 @@ cd /data/yanziyi/gpu_test_0610/other_scripts
 bash run_async.sh
 bash run_async_32b.sh
 
-运行完毕后结果自动填入results_tables.md
+运行完毕后结果自动填入results_tables.md，gpu/cpu监控数据在./outputs/qwen3_8b_grpo_bs256_n4_resp1024_*_monitor.csv
+请检查results_tables.md和./outputs/qwen3_8b_grpo_bs256_n4_resp1024_*_monitor.csv是否有空值，若无异常，请将文件发给ziyi。

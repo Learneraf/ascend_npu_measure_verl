@@ -23,10 +23,11 @@ import psutil
 class GPUSample:
     """单个 GPU 在某一时刻的采样值。缺失字段为 None。"""
     __slots__ = ("util_pct", "mem_used_gb", "mem_total_gb", "power_w", "temp_c",
-                 "bw_tx_GBs", "bw_rx_GBs")
+                 "bw_tx_GBs", "bw_rx_GBs", "pcie_tx_GBs", "pcie_rx_GBs")
 
     def __init__(self, util_pct=None, mem_used_gb=None, mem_total_gb=None,
-                 power_w=None, temp_c=None, bw_tx_GBs=None, bw_rx_GBs=None):
+                 power_w=None, temp_c=None, bw_tx_GBs=None, bw_rx_GBs=None,
+                 pcie_tx_GBs=None, pcie_rx_GBs=None):
         self.util_pct    = util_pct
         self.mem_used_gb = mem_used_gb
         self.mem_total_gb = mem_total_gb
@@ -34,6 +35,8 @@ class GPUSample:
         self.temp_c      = temp_c
         self.bw_tx_GBs   = bw_tx_GBs
         self.bw_rx_GBs   = bw_rx_GBs
+        self.pcie_tx_GBs = pcie_tx_GBs
+        self.pcie_rx_GBs = pcie_rx_GBs
 
 
 class BaseMonitor:
@@ -119,6 +122,14 @@ class NVMLMonitor(BaseMonitor):
                             results[gid].bw_rx_GBs = round((_rx - _py) / _dt / 1e6, 2)
                     if gid in _nvlink_cur:
                         self._nvlink_prev[gid] = (_now, *_nvlink_cur[gid])
+                except Exception:
+                    pass
+                # ── PCIe 带宽（KB/s → GB/s，NVML 瞬时采样）────────────────────
+                try:
+                    tx_kb = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, self._pynvml.NVML_PCIE_UTIL_TX_BYTES)
+                    rx_kb = self._pynvml.nvmlDeviceGetPcieThroughput(hdl, self._pynvml.NVML_PCIE_UTIL_RX_BYTES)
+                    results[gid].pcie_tx_GBs = round(tx_kb / 1e6, 3)
+                    results[gid].pcie_rx_GBs = round(rx_kb / 1e6, 3)
                 except Exception:
                     pass
             except Exception:
@@ -531,6 +542,8 @@ def build_header(n_gpus: int) -> list:
             f"gpu{i}_temp_c",
             f"gpu{i}_bw_tx_GBs",
             f"gpu{i}_bw_rx_GBs",
+            f"gpu{i}_pcie_tx_GBs",
+            f"gpu{i}_pcie_rx_GBs",
         ]
     cols += ["cpu_util_pct", "ram_used_gb", "ram_total_gb"]
     return cols
@@ -585,6 +598,8 @@ def main():
                 row[f"gpu{gid}_temp_c"]        = "" if s.temp_c       is None else s.temp_c
                 row[f"gpu{gid}_bw_tx_GBs"]    = "" if s.bw_tx_GBs   is None else s.bw_tx_GBs
                 row[f"gpu{gid}_bw_rx_GBs"]    = "" if s.bw_rx_GBs   is None else s.bw_rx_GBs
+                row[f"gpu{gid}_pcie_tx_GBs"]  = "" if s.pcie_tx_GBs is None else s.pcie_tx_GBs
+                row[f"gpu{gid}_pcie_rx_GBs"]  = "" if s.pcie_rx_GBs is None else s.pcie_rx_GBs
 
             # ── CPU / RAM ────────────────────────────────────────
             row["cpu_util_pct"] = psutil.cpu_percent(interval=None)
