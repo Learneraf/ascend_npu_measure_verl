@@ -3,8 +3,8 @@
 # 同步基准：与 run_async.sh 对比
 set -xeuo pipefail
 
-PROJ=/data/yanziyi
-SCRIPT_DIR=/data/yanziyi/gpu_test_0610
+PROJ=/mnt/data
+SCRIPT_DIR=/mnt/data/gpu_test_0610
 LOG_DIR=${SCRIPT_DIR}/outputs
 mkdir -p "${LOG_DIR}"
 
@@ -12,7 +12,8 @@ mkdir -p "${LOG_DIR}"
 MODEL_PATH=${PROJ}/models/Qwen3-8B
 DATA_DIR=${PROJ}/data/gsm8k_verl
 
-source ${SCRIPT_DIR}/venv/bin/activate
+# 暂时不激活cuda中的python环境
+# source ${SCRIPT_DIR}/venv/bin/activate
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export VLLM_LOGGING_LEVEL=INFO
