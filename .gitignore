@@ -5,6 +5,7 @@ venv/
 **/__pycache__/
 *.pyc
 *.pyo
+kernel_meta/
 
 # Slurm/Ray tmp
 ray_tmp/

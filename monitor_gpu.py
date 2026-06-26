@@ -263,9 +263,8 @@ class ROCMSMIMonitor(BaseMonitor):
 class NPUSMIMonitor(BaseMonitor):
     """
     昇腾 NPU 使用 npu-smi 工具。
-    npu-smi info -t usages 格式（每行一个 NPU/Chip）：
-      NPU   Chip  Process  Memory-Usage(MB)      HBM-Usage(MB)   Util(%)
-      0     0     pid      used/total            used/total      83
+    优先解析 `npu-smi info` 的整机表格；部分 CANN 版本的
+    `npu-smi info -t usages` 需要逐卡 -i 参数，因此只作为兜底。
     """
     # 尝试使用 pynpusmi（如果安装了）；否则用 subprocess
     _pynpusmi = None
@@ -278,97 +277,117 @@ class NPUSMIMonitor(BaseMonitor):
         except ImportError:
             self._pynpusmi = None
 
-    def _sample_subprocess(self):
-        results = {i: GPUSample() for i in self.gpu_ids}
+    @staticmethod
+    def _run_npu_smi(*args, timeout=5):
         try:
-            r = subprocess.run(
-                ["npu-smi", "info", "-t", "usages"],
-                capture_output=True, text=True, timeout=5
-            )
-            lines = r.stdout.splitlines()
+            r = subprocess.run(["npu-smi", *args], capture_output=True, text=True, timeout=timeout)
+            if r.returncode == 0:
+                return r.stdout
         except Exception:
-            return results
+            pass
+        return ""
 
-        # Parse table lines: skip headers (lines containing "NPU" or "---")
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith(("NPU", "+", "-", "=")):
+    def _parse_info_table(self, out):
+        results = {i: GPUSample() for i in self.gpu_ids}
+        current_npu = None
+
+        for raw in out.splitlines():
+            line = raw.strip()
+            if not line.startswith("|") or line.startswith(("+", "| NPU", "| Chip", "| No running")):
                 continue
-            parts = re.split(r"\s+", line)
-            # Expected: npu_id chip_id [proc_id] mem_used/mem_total  util
-            # Real format varies by CANN version, try to extract numbers
-            try:
-                npu_id = int(parts[0])
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+
+            first_nums = re.findall(r"\d+", cells[0])
+            if not first_nums:
+                continue
+
+            # First row of a card block:
+            # | 0 910B3 | OK | 90.0 32 0 / 0 |
+            if re.search(r"\b(OK|WARN|WARNING|ALARM|FAULT|ERROR)\b", cells[1], re.I):
+                npu_id = int(first_nums[0])
+                current_npu = npu_id
                 if npu_id not in results:
                     continue
-                s = GPUSample()
-
-                # Look for memory pattern "used/total" (MB)
-                for p in parts:
-                    m = re.match(r"(\d+)/(\d+)$", p)
-                    if m:
-                        used_mb  = int(m.group(1))
-                        total_mb = int(m.group(2))
-                        s.mem_used_gb  = round(used_mb  / 1024, 2)
-                        s.mem_total_gb = round(total_mb / 1024, 2)
-                        break
-
-                # Last numeric field is often util%
-                nums = [x for x in parts[1:] if re.match(r"^\d+$", x)]
-                if nums:
-                    s.util_pct = float(nums[-1])
-
-                results[npu_id] = s
-            except (ValueError, IndexError):
+                nums = re.findall(r"[\d.]+", cells[2])
+                if len(nums) >= 2:
+                    results[npu_id].power_w = float(nums[0])
+                    results[npu_id].temp_c = float(nums[1])
                 continue
 
-        # Try npu-smi info -t power for power/temp
-        try:
-            r = subprocess.run(
-                ["npu-smi", "info", "-t", "power"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if not line or line.startswith(("NPU", "+", "-", "=")):
-                    continue
-                parts = re.split(r"\s+", line)
-                try:
-                    npu_id = int(parts[0])
-                    if npu_id not in results:
-                        continue
-                    nums = [x for x in parts[1:] if re.match(r"^[\d.]+$", x)]
-                    if len(nums) >= 2:
-                        results[npu_id].power_w = float(nums[0])
-                        results[npu_id].temp_c  = float(nums[1])
-                except (ValueError, IndexError):
-                    continue
-        except Exception:
-            pass
+            # Second row of a card block:
+            # | 0 | 0000:C1:00.0 | 0 0 / 0 3396 / 65536 |
+            if current_npu is None or current_npu not in results:
+                continue
+            if not re.search(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.\d", cells[1], re.I):
+                continue
+            nums = re.findall(r"[\d.]+", cells[2])
+            if nums:
+                results[current_npu].util_pct = float(nums[0])
+            pairs = re.findall(r"(\d+)\s*/\s*(\d+)", cells[2])
+            if pairs:
+                used_mb, total_mb = map(int, pairs[-1])
+                results[current_npu].mem_used_gb = round(used_mb / 1024, 2)
+                results[current_npu].mem_total_gb = round(total_mb / 1024, 2)
 
-        # ── HCCS 带宽（npu-smi info -t traffic，TX/RX 末两列，单位 GB/s）──
-        try:
-            r = subprocess.run(
-                ["npu-smi", "info", "-t", "traffic"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if not line or line.startswith(("NPU", "+", "-", "=")):
+        return results
+
+    def _fill_from_card_detail(self, results, gid):
+        usages = self._run_npu_smi("info", "-t", "usages", "-i", str(gid))
+        if usages:
+            cap_mb = used_rate = None
+            for raw in usages.splitlines():
+                line = raw.strip()
+                m = re.match(r"HBM Capacity\(MB\)\s*:\s*([\d.]+)", line)
+                if m:
+                    cap_mb = float(m.group(1))
                     continue
-                parts = re.split(r"\s+", line)
-                try:
-                    npu_id = int(parts[0])
-                    if npu_id not in results:
-                        continue
-                    nums = [x for x in parts if re.match(r"^[\d.]+$", x)]
-                    if len(nums) >= 2:
-                        results[npu_id].bw_tx_GBs = float(nums[-2])
-                        results[npu_id].bw_rx_GBs = float(nums[-1])
-                except (ValueError, IndexError):
+                m = re.match(r"HBM Usage Rate\(%\)\s*:\s*([\d.]+)", line)
+                if m:
+                    used_rate = float(m.group(1))
                     continue
-        except Exception:
-            pass
+                m = re.match(r"Aicore Usage Rate\(%\)\s*:\s*([\d.]+)", line)
+                if m:
+                    results[gid].util_pct = float(m.group(1))
+            if cap_mb is not None:
+                results[gid].mem_total_gb = round(cap_mb / 1024, 2)
+                if used_rate is not None:
+                    results[gid].mem_used_gb = round(cap_mb * used_rate / 100 / 1024, 2)
+
+        power = self._run_npu_smi("info", "-t", "power", "-i", str(gid))
+        for raw in power.splitlines():
+            m = re.search(r"NPU Real-time Power\(W\)\s*:\s*([\d.]+)", raw)
+            if m:
+                results[gid].power_w = float(m.group(1))
+
+        temp = self._run_npu_smi("info", "-t", "temp", "-i", str(gid))
+        for raw in temp.splitlines():
+            m = re.search(r"NPU Temperature \(C\)\s*:\s*([\d.]+)", raw)
+            if m:
+                results[gid].temp_c = float(m.group(1))
+
+    def _fill_hccs_bw(self, results):
+        if os.environ.get("MONITOR_NPU_HCCS_BW", "0") != "1":
+            return
+        for gid in self.gpu_ids:
+            out = self._run_npu_smi("info", "-t", "hccs-bw", "-i", str(gid), "-c", "0", "-time", "1", timeout=3)
+            for raw in out.splitlines():
+                parts = re.split(r"\s+", raw.strip())
+                if len(parts) >= 3 and parts[0].lower() == "total":
+                    try:
+                        results[gid].bw_tx_GBs = round(float(parts[1]), 3)
+                        results[gid].bw_rx_GBs = round(float(parts[2]), 3)
+                    except ValueError:
+                        pass
+
+    def _sample_subprocess(self):
+        results = self._parse_info_table(self._run_npu_smi("info"))
+        for gid in self.gpu_ids:
+            s = results.get(gid, GPUSample())
+            if any(v is None for v in (s.util_pct, s.mem_used_gb, s.mem_total_gb, s.power_w, s.temp_c)):
+                self._fill_from_card_detail(results, gid)
+        self._fill_hccs_bw(results)
 
         return results
 
@@ -531,9 +550,9 @@ def auto_detect_monitor(gpu_ids) -> BaseMonitor:
 
 # ─── CSV 列头 ─────────────────────────────────────────────────────────────────
 
-def build_header(n_gpus: int) -> list:
+def build_header(gpu_ids: list[int]) -> list:
     cols = ["wall_time", "elapsed_s"]
-    for i in range(n_gpus):
+    for i in gpu_ids:
         cols += [
             f"gpu{i}_util_pct",
             f"gpu{i}_mem_used_gb",
@@ -559,12 +578,11 @@ def main():
     args = ap.parse_args()
 
     gpu_ids = [int(x) for x in args.gpu_ids.split(",")]
-    n_gpus  = len(gpu_ids)
 
     monitor = auto_detect_monitor(gpu_ids)
     psutil.cpu_percent(interval=None)  # 预热
 
-    header = build_header(n_gpus)
+    header = build_header(gpu_ids)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
     stop = [False]
