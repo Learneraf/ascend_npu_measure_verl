@@ -10,7 +10,16 @@ mkdir -p "${LOG_DIR}"
 source "${SCRIPT_DIR}/scripts/ascend_common.sh"
 ascend_setup_runtime
 
-MODEL_PATH=${MODEL_PATH:-${PROJ}/models/Qwen3-32B}
+MODEL_PATH=${MODEL_PATH:-}
+if [ -z "${MODEL_PATH}" ]; then
+    for candidate in "${PROJ}/models/Qwen3-32B" "${PROJ}/models/Qwen3-32B-local"; do
+        if [ -d "${candidate}" ]; then
+            MODEL_PATH="${candidate}"
+            break
+        fi
+    done
+    MODEL_PATH=${MODEL_PATH:-${PROJ}/models/Qwen3-32B}
+fi
 DATA_DIR=${DATA_DIR:-${PROJ}/data/gsm8k_verl}
 
 if [ -f "${SCRIPT_DIR}/venv/bin/activate" ] && [ "${USE_VENV:-0}" = "1" ]; then
@@ -19,6 +28,11 @@ fi
 
 TRAINER_MODULE=${TRAINER_MODULE:-$(ascend_find_trainer_module "verl.trainer.main_ppo")}
 ascend_preflight "${MODEL_PATH}" "${DATA_DIR}" "${NGPUS_PER_NODE}"
+
+if [ "${PREFLIGHT_ONLY:-0}" = "1" ]; then
+    echo "[preflight] PREFLIGHT_ONLY=1, exiting before training."
+    exit 0
+fi
 
 # ── 超参 ────────────────────────────────────────────────────────
 train_batch_size=${train_batch_size:-64}

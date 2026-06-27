@@ -51,7 +51,7 @@ baseline 和 ablation 脚本默认使用以下路径和环境：
 - `ACCELERATOR=ascend`
 - `DEVICE_IDS=0,1,2,3,4,5,6,7`
 - `PROJ=/mnt/data/FlagPerf`
-- `MODEL_PATH=${PROJ}/models/Qwen3-8B` 或 `${PROJ}/models/Qwen3-32B`
+- `MODEL_PATH=${PROJ}/models/Qwen3-8B` 或自动选择 `${PROJ}/models/Qwen3-32B` / `${PROJ}/models/Qwen3-32B-local`
 - `DATA_DIR=${PROJ}/data/gsm8k_verl`
 
 脚本会自动设置 `ASCEND_RT_VISIBLE_DEVICES`、`VLLM_USE_V1=1`、`VLLM_WORKER_MULTIPROC_METHOD=spawn`、`HCCL_CONNECT_TIMEOUT=1500`，并传入 `trainer.device=npu`。如果当前 veRL 没有 `verl.trainer.main_ppo_sync`，脚本会使用当前环境存在的 `verl.trainer.main_ppo`。
@@ -84,7 +84,13 @@ bash run_qwen3_8b_a100.sh
 /mnt/data/FlagPerf/models/Qwen3-32B
 ```
 
-或者显式传入：
+本机当前存在的 32B 模型目录为：
+
+```bash
+/mnt/data/FlagPerf/models/Qwen3-32B-local
+```
+
+脚本会优先使用 `Qwen3-32B`，不存在时自动回退到 `Qwen3-32B-local`。也可以显式传入：
 
 ```bash
 MODEL_PATH=/path/to/Qwen3-32B bash run_qwen3_32b_lora_a100.sh
