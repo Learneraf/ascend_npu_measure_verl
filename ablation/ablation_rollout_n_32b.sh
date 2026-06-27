@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/ablation_common.sh"
 for n in 1 2 4 8 16; do
     echo "========== rollout_n=${n} =========="
     set +e
-    rollout_n=${n} FILL_MODE=skip bash "${BASE}/run_qwen3_32b_lora_a100.sh" \
+    rollout_n=${n} FILL_MODE=skip ablation_run_32b \
         actor_rollout_ref.rollout.n=${n} \
         trainer.total_epochs=1 \
         trainer.total_training_steps=20 \

@@ -47,9 +47,14 @@ total_epochs=${total_epochs:-1}
 total_training_steps=${total_training_steps:-20}
 save_freq=${save_freq:--1}
 test_freq=${test_freq:-5}
-gpu_memory_utilization=${gpu_memory_utilization:-0.4}
+gpu_memory_utilization=${gpu_memory_utilization:-0.85}
 actor_micro_bsz=${actor_micro_bsz:-1}
 logprob_micro_bsz=${logprob_micro_bsz:-1}
+actor_param_offload=${actor_param_offload:-False}
+actor_optimizer_offload=${actor_optimizer_offload:-True}
+rollout_enforce_eager=${rollout_enforce_eager:-True}
+rollout_enable_prefix_caching=${rollout_enable_prefix_caching:-False}
+rollout_enable_chunked_prefill=${rollout_enable_chunked_prefill:-False}
 
 # ── LoRA 配置 ────────────────────────────────────────────────────
 lora_rank=${lora_rank:-64}
@@ -103,8 +108,8 @@ python3 -m "${TRAINER_MODULE}" \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.ref.use_torch_compile=False \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${actor_param_offload} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_optimizer_offload} \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
@@ -115,7 +120,9 @@ python3 -m "${TRAINER_MODULE}" \
     actor_rollout_ref.rollout.gpu_memory_utilization=${gpu_memory_utilization} \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
+    actor_rollout_ref.rollout.enforce_eager=${rollout_enforce_eager} \
+    actor_rollout_ref.rollout.enable_prefix_caching=${rollout_enable_prefix_caching} \
+    actor_rollout_ref.rollout.enable_chunked_prefill=${rollout_enable_chunked_prefill} \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${logprob_micro_bsz} \

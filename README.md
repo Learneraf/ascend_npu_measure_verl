@@ -76,6 +76,17 @@ total_training_steps=1 total_epochs=1 test_freq=-1 save_freq=-1 \
 bash run_qwen3_8b_a100.sh
 ```
 
+用于快速验证 32B LoRA 链路，不填表：
+
+```bash
+cd /mnt/data/gpu_test_0610
+FILL_MODE=skip \
+train_batch_size=16 ppo_mini_batch_size=8 \
+max_response_length=32 rollout_n=1 rollout_tp=4 \
+total_training_steps=1 total_epochs=1 test_freq=-1 save_freq=-1 \
+bash run_qwen3_32b_lora_a100.sh
+```
+
 ## 32B 模型要求
 
 运行 32B LoRA 前必须准备：
@@ -98,6 +109,24 @@ MODEL_PATH=/path/to/Qwen3-32B bash run_qwen3_32b_lora_a100.sh
 
 如果模型目录不存在，脚本会在训练前预检失败，避免启动到中途才报错。第二部分的 32B ablation 脚本会捕获这类失败，并在 `results_tables.md` 中写入对应失败/OOM 标记后继续下一组参数。
 
+当前 Ascend 上 32B LoRA 默认启用以下兼容参数：
+
+- `gpu_memory_utilization=0.85`，避免 vLLM KV cache 可用内存为 0。
+- `rollout_enforce_eager=True`、`rollout_enable_prefix_caching=False` 和 `rollout_enable_chunked_prefill=False`，规避 vLLM Ascend LoRA/Punica 在 ACL graph padding 下的 shape mismatch。
+- `actor_param_offload=False`，规避 LoRA ref logprob 阶段 FSDP 参数 offload 断言。
+
+如需做完整基准，可以继续用原命令：
+
+```bash
+bash run_qwen3_32b_lora_a100.sh
+```
+
+若需要临时覆盖兼容参数，可通过环境变量传入，例如：
+
+```bash
+gpu_memory_utilization=0.9 actor_param_offload=False bash run_qwen3_32b_lora_a100.sh
+```
+
 ## 输出文件
 
 训练日志和 NPU/CPU/RAM 监控 CSV 写入：
@@ -115,3 +144,5 @@ MODEL_PATH=/path/to/Qwen3-32B bash run_qwen3_32b_lora_a100.sh
 ```bash
 USE_VENV=1 bash ablation_rollout_n.sh
 ```
+
+32B ablation 脚本通过 `ablation_common.sh` 的 `ablation_run_32b` 统一继承 32B LoRA Ascend 兼容参数，避免各 sweep 重复维护 vLLM eager、prefix cache 和 FSDP offload 配置。

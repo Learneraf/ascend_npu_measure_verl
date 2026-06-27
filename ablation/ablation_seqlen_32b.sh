@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/ablation_common.sh"
 for resp in 256 512 1024 2048; do
     echo "========== max_response_length=${resp} =========="
     set +e
-    max_response_length=${resp} FILL_MODE=skip bash "${BASE}/run_qwen3_32b_lora_a100.sh" \
+    max_response_length=${resp} FILL_MODE=skip ablation_run_32b \
         data.max_response_length=${resp} \
         trainer.total_epochs=1 \
         trainer.total_training_steps=20 \

@@ -66,6 +66,16 @@ ablation_mark_oom() {
     echo "[fill] ${label} marked as failed/OOM"
 }
 
+ablation_run_32b() {
+    actor_param_offload=${actor_param_offload:-False} \
+    actor_optimizer_offload=${actor_optimizer_offload:-True} \
+    rollout_enforce_eager=${rollout_enforce_eager:-True} \
+    rollout_enable_prefix_caching=${rollout_enable_prefix_caching:-False} \
+    rollout_enable_chunked_prefill=${rollout_enable_chunked_prefill:-False} \
+    gpu_memory_utilization=${gpu_memory_utilization:-0.85} \
+    bash "${BASE}/run_qwen3_32b_lora_a100.sh" "$@"
+}
+
 ablation_cleanup() {
     echo "[cleanup] Killing stale VLLM::* processes..."
     pkill -9 -f 'VLLM::' 2>/dev/null || true

@@ -10,7 +10,7 @@ for bsz in 16 32 64 128; do
     mini=$(( bsz / 4 ))
     echo "========== train_batch_size=${bsz} ppo_mini=${mini} =========="
     set +e
-    train_batch_size=${bsz} ppo_mini_batch_size=${mini} FILL_MODE=skip bash "${BASE}/run_qwen3_32b_lora_a100.sh" \
+    train_batch_size=${bsz} ppo_mini_batch_size=${mini} FILL_MODE=skip ablation_run_32b \
         data.train_batch_size=${bsz} \
         actor_rollout_ref.actor.ppo_mini_batch_size=${mini} \
         trainer.total_epochs=1 \
